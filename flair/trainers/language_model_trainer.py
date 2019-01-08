@@ -167,7 +167,7 @@ class LanguageModelTrainer:
                  optimizer_state: dict = None
                  ):
         self.model: LanguageModel = model
-        self.optimzer: Optimizer = optimizer
+        self.optimizer: Optimizer = optimizer
         self.corpus: TextCorpus = corpus
         self.test_mode: bool = test_mode
 
@@ -211,7 +211,7 @@ class LanguageModelTrainer:
 
             epoch = self.epoch
             best_val_loss = self.loss
-            optimizer = self.optimzer(self.model.parameters(), lr=learning_rate, **kwargs)
+            optimizer = self.optimizer(self.model.parameters(), lr=learning_rate, **kwargs)
             if self.optimizer_state is not None:
                 optimizer.load_state_dict(self.optimizer_state)
 
@@ -224,6 +224,7 @@ class LanguageModelTrainer:
                                                                  factor=anneal_factor,
                                                                  patience=patience)
 
+            train_data = None
             for split in range(1 + self.split, max_splits + 1):
 
                 # after pass over all splits, increment epoch count
@@ -235,9 +236,10 @@ class LanguageModelTrainer:
                 for group in optimizer.param_groups:
                     learning_rate = group['lr']
 
-                train_slice = self.corpus.get_next_train_slice()
+                if train_data is None or len(self.corpus.train_files) > 1:
+                    train_slice = self.corpus.get_next_train_slice()
+                    train_data = self._batchify(train_slice, mini_batch_size)
 
-                train_data = self._batchify(train_slice, mini_batch_size)
                 log.info('\t({:%H:%M:%S})'.format(datetime.datetime.now()))
 
                 # go into train mode
@@ -300,6 +302,8 @@ class LanguageModelTrainer:
                 scheduler.step(val_loss)
 
                 log.info('best loss so far {:5.2f}'.format(best_val_loss))
+
+                log.info(self.model.generate_text())
 
                 if checkpoint:
                     self.model.save_checkpoint(base_path / 'checkpoint.pt', optimizer, epoch, split, best_val_loss)

@@ -17,16 +17,17 @@ from typing import List, Tuple, Union
 
 from flair.training_utils import clear_embeddings
 
+from tqdm import tqdm
+
 
 log = logging.getLogger('flair')
-
 
 START_TAG: str = '<START>'
 STOP_TAG: str = '<STOP>'
 
 
 def to_scalar(var):
-    return var.view(-1).data.tolist()[0]
+    return var.view(-1).detach().tolist()[0]
 
 
 def argmax(vec):
@@ -144,8 +145,8 @@ class SequenceTagger(flair.nn.Model):
         if self.use_crf:
             self.transitions = torch.nn.Parameter(
                 torch.randn(self.tagset_size, self.tagset_size))
-            self.transitions.data[self.tag_dictionary.get_idx_for_item(START_TAG), :] = -10000
-            self.transitions.data[:, self.tag_dictionary.get_idx_for_item(STOP_TAG)] = -10000
+            self.transitions.detach()[self.tag_dictionary.get_idx_for_item(START_TAG), :] = -10000
+            self.transitions.detach()[:, self.tag_dictionary.get_idx_for_item(STOP_TAG)] = -10000
 
         self.to(flair.device)
 
@@ -165,7 +166,8 @@ class SequenceTagger(flair.nn.Model):
 
         torch.save(model_state, str(model_file), pickle_protocol=4)
 
-    def save_checkpoint(self, model_file: Union[str, Path], optimizer_state: dict, scheduler_state: dict, epoch: int, loss: float):
+    def save_checkpoint(self, model_file: Union[str, Path], optimizer_state: dict, scheduler_state: dict, epoch: int,
+                        loss: float):
         model_state = {
             'state_dict': self.state_dict(),
             'embeddings': self.embeddings,
@@ -236,20 +238,22 @@ class SequenceTagger(flair.nn.Model):
             state = torch.load(str(model_file), map_location=flair.device)
         return state
 
-    def forward_loss(self, sentences: Union[List[Sentence], Sentence]) -> torch.tensor:
-        features, lengths, tags = self.forward(sentences)
+    def forward_loss(self, sentences: Union[List[Sentence], Sentence], sort=True) -> torch.tensor:
+        features, lengths, tags = self.forward(sentences, sort=sort)
         return self._calculate_loss(features, lengths, tags)
 
-    def forward_labels_and_loss(self, sentences: Union[List[Sentence], Sentence]) -> (List[List[Label]], torch.tensor):
+    def forward_labels_and_loss(self, sentences: Union[List[Sentence], Sentence],
+                                sort=True) -> (List[List[Label]], torch.tensor):
         with torch.no_grad():
-            feature, lengths, tags = self.forward(sentences)
+            feature, lengths, tags = self.forward(sentences, sort=sort)
             loss = self._calculate_loss(feature, lengths, tags)
             tags = self._obtain_labels(feature, lengths)
             return tags, loss
 
-    def predict(self, sentences: Union[List[Sentence], Sentence], mini_batch_size=32) -> List[Sentence]:
+    def predict(self, sentences: Union[List[Sentence], Sentence],
+                mini_batch_size=32, verbose=False) -> List[Sentence]:
         with torch.no_grad():
-            if type(sentences) is Sentence:
+            if isinstance(sentences, Sentence):
                 sentences = [sentences]
 
             filtered_sentences = self._filter_empty_sentences(sentences)
@@ -257,31 +261,46 @@ class SequenceTagger(flair.nn.Model):
             # remove previous embeddings
             clear_embeddings(filtered_sentences, also_clear_word_embeddings=True)
 
+            # revere sort all sequences by their length
+            filtered_sentences.sort(key=lambda x: len(x), reverse=True)
+
             # make mini-batches
             batches = [filtered_sentences[x:x + mini_batch_size] for x in
                        range(0, len(filtered_sentences), mini_batch_size)]
 
-            for batch in batches:
-                tags, _ = self.forward_labels_and_loss(batch)
+            # progress bar for verbosity
+            if verbose:
+                batches = tqdm(batches)
+
+            for i, batch in enumerate(batches):
+
+                if verbose:
+                    batches.set_description(f'Inferencing on batch {i}')
+
+                tags, _ = self.forward_labels_and_loss(batch, sort=False)
 
                 for (sentence, sent_tags) in zip(batch, tags):
                     for (token, tag) in zip(sentence.tokens, sent_tags):
                         token: Token = token
                         token.add_tag_label(self.tag_type, tag)
 
+                # clearing token embeddings to save memory
+                clear_embeddings(batch, also_clear_word_embeddings=True)
+
             return sentences
 
-    def forward(self, sentences: List[Sentence]):
+    def forward(self, sentences: List[Sentence], sort=True):
         self.zero_grad()
 
         self.embeddings.embed(sentences)
 
-        # first, sort sentences by number of tokens
-        sentences.sort(key=lambda x: len(x), reverse=True)
-        longest_token_sequence_in_batch: int = len(sentences[0])
+        # if sorting is enabled, sort sentences by number of tokens
+        if sort:
+            sentences.sort(key=lambda x: len(x), reverse=True)
 
         lengths: List[int] = [len(sentence.tokens) for sentence in sentences]
         tag_list: List = []
+        longest_token_sequence_in_batch: int = lengths[0]
 
         # initialize zero-padded word embeddings tensor
         sentence_tensor = torch.zeros([len(sentences),
@@ -422,8 +441,8 @@ class SequenceTagger(flair.nn.Model):
         for feat in feats:
             next_tag_var = forward_var.view(1, -1).expand(self.tagset_size, self.tagset_size) + self.transitions
             _, bptrs_t = torch.max(next_tag_var, dim=1)
-            bptrs_t = bptrs_t.squeeze().data.cpu().numpy()
-            next_tag_var = next_tag_var.data.cpu().numpy()
+            bptrs_t = bptrs_t.squeeze().detach().cpu().numpy()
+            next_tag_var = next_tag_var.detach().cpu().numpy()
             viterbivars_t = next_tag_var[range(len(bptrs_t)), bptrs_t]
             viterbivars_t = torch.FloatTensor(viterbivars_t, device=flair.device)
             forward_var = viterbivars_t + feat
@@ -431,8 +450,8 @@ class SequenceTagger(flair.nn.Model):
             backpointers.append(bptrs_t)
 
         terminal_var = forward_var + self.transitions[self.tag_dictionary.get_idx_for_item(STOP_TAG)]
-        terminal_var.data[self.tag_dictionary.get_idx_for_item(STOP_TAG)] = -10000.
-        terminal_var.data[self.tag_dictionary.get_idx_for_item(START_TAG)] = -10000.
+        terminal_var.detach()[self.tag_dictionary.get_idx_for_item(STOP_TAG)] = -10000.
+        terminal_var.detach()[self.tag_dictionary.get_idx_for_item(START_TAG)] = -10000.
         best_tag_id = argmax(terminal_var.unsqueeze(0))
 
         best_path = [best_tag_id]
@@ -517,6 +536,24 @@ class SequenceTagger(flair.nn.Model):
         aws_resource_path_v04 = 'https://s3.eu-central-1.amazonaws.com/alan-nlp/resources/models-v0.4'
         cache_dir = Path('models')
 
+        if model.lower() == 'ner-multi' or model.lower() == 'multi-ner':
+            base_path = '/'.join([aws_resource_path_v04,
+                                  'release-quadner-512-l2-multi-embed',
+                                  'quadner-large.pt'])
+            model_file = cached_path(base_path, cache_dir=cache_dir)
+
+        if model.lower() == 'ner-multi-fast' or model.lower() == 'multi-ner-fast':
+            base_path = '/'.join([aws_resource_path_v04,
+                                  'NER-multi-fast',
+                                  'ner-multi-fast.pt'])
+            model_file = cached_path(base_path, cache_dir=cache_dir)
+
+        if model.lower() == 'ner-multi-fast-learn' or model.lower() == 'multi-ner-fast-learn':
+            base_path = '/'.join([aws_resource_path_v04,
+                                  'NER-multi-fast-evolve',
+                                  'ner-multi-fast-learn.pt'])
+            model_file = cached_path(base_path, cache_dir=cache_dir)
+
         if model.lower() == 'ner':
             base_path = '/'.join([aws_resource_path,
                                   'NER-conll03--h256-l1-b32-%2Bglove%2Bnews-forward%2Bnews-backward--v0.2',
@@ -539,6 +576,18 @@ class SequenceTagger(flair.nn.Model):
             base_path = '/'.join([aws_resource_path,
                                   'NER-ontoner--h256-l1-b32-%2Bcrawl%2Bnews-forward-fast%2Bnews-backward-fast--v0.2',
                                   'en-ner-ontonotes-fast-v0.3.pt'])
+            model_file = cached_path(base_path, cache_dir=cache_dir)
+
+        elif model.lower() == 'pos-multi' or model.lower() == 'multi-pos':
+            base_path = '/'.join([aws_resource_path_v04,
+                                  'release-dodekapos-512-l2-multi',
+                                  'pos-multi-v0.1.pt'])
+            model_file = cached_path(base_path, cache_dir=cache_dir)
+
+        elif model.lower() == 'pos-multi-fast' or model.lower() == 'multi-pos-fast':
+            base_path = '/'.join([aws_resource_path_v04,
+                                  'UPOS-multi-fast',
+                                  'pos-multi-fast.pt'])
             model_file = cached_path(base_path, cache_dir=cache_dir)
 
         elif model.lower() == 'pos':
@@ -581,6 +630,12 @@ class SequenceTagger(flair.nn.Model):
             base_path = '/'.join([aws_resource_path,
                                   'UPOS-udgerman--h256-l1-b8-%2Bgerman-forward%2Bgerman-backward--v0.2',
                                   'de-pos-ud-v0.2.pt'])
+            model_file = cached_path(base_path, cache_dir=cache_dir)
+
+        elif model.lower() == 'de-pos-fine-grained':
+            base_path = '/'.join([aws_resource_path_v04,
+                                  'POS-fine-grained-german-tweets',
+                                  'de-pos-twitter-v0.1.pt'])
             model_file = cached_path(base_path, cache_dir=cache_dir)
 
         elif model.lower() == 'de-ner':

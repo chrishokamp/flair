@@ -55,7 +55,7 @@ class TextClassifier(flair.nn.Model):
     def forward(self, sentences) -> List[List[float]]:
         self.document_embeddings.embed(sentences)
 
-        text_embedding_list = [sentence.get_embedding() for sentence in sentences]
+        text_embedding_list = [sentence.get_embedding().unsqueeze(0) for sentence in sentences]
         text_embedding_tensor = torch.cat(text_embedding_list, 0)
         text_embedding_tensor = text_embedding_tensor.to(flair.device)
 
@@ -259,6 +259,10 @@ class TextClassifier(flair.nn.Model):
         if model.lower() == 'de-offensive-language':
             base_path = '/'.join([aws_resource_path, 'TEXT-CLASSIFICATION_germ-eval-2018_task-1',
                                   'germ-eval-2018-task-1.pt'])
+            model_file = cached_path(base_path, cache_dir=cache_dir)
+
+        elif model.lower() == 'en-sentiment':
+            base_path = '/'.join([aws_resource_path, 'TEXT-CLASSIFICATION_imdb', 'imdb.pt'])
             model_file = cached_path(base_path, cache_dir=cache_dir)
 
         if model_file is not None:
