@@ -683,10 +683,15 @@ class FlairEmbeddings(TokenEmbeddings):
                         offset = offset_backward
 
                     embedding = all_hidden_states_in_lm[offset, i, :]
+                    # WORKING: assert that we're actually getting the embedding of this token
+                    # WORKING: in the case of sub-word tokenization we have to be smarter
+                    # import ipdb;ipdb.set_trace()
 
                     # if self.tokenized_lm or token.whitespace_after:
-                    offset_forward += 1
-                    offset_backward -= 1
+
+                    # Chris: our comment
+                    #offset_forward += 1
+                    #offset_backward -= 1
 
                     offset_backward -= len(token.text)
 
